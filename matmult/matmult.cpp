@@ -1,5 +1,5 @@
 //
-// Created by Dima Zhylko on 08/05/2020.
+// Created by Dima Zhylko on 09/05/2020.
 //
 
 #include <vulkan/vulkan.h>
@@ -34,12 +34,19 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 /// GLOBAL VARIABLES
 VkInstance instance;
 VkDebugUtilsMessengerEXT debugMessenger;
-VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+VkPhysicalDevice physicalDevice;
 uint32_t queueFamilyIndex = 0;
-VkDevice device = VK_NULL_HANDLE;
+VkDevice device;
 VkQueue queue;
 VkDescriptorSetLayout setLayout;
 VkPipelineLayout pipelineLayout;
+
+struct pushConstants {
+    uint32_t n;
+    uint32_t m;
+    uint32_t k;
+};
+
 VkPipeline pipeline;
 VkDescriptorPool descriptorPool;
 VkDescriptorSet descriptorSet;
@@ -262,6 +269,14 @@ void createBindingsAndPipelineLayout(uint32_t bindingsCount){
     pipelineLayoutCreateInfo.setLayoutCount = 1;
     pipelineLayoutCreateInfo.pSetLayouts = &setLayout;
 
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.size = sizeof(pushConstantRange);
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+
+    pipelineLayoutCreateInfo.pushConstantRangeCount = 1;
+    pipelineLayoutCreateInfo.pPushConstantRanges = &pushConstantRange;
+
     if(vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayout)){
         throw std::runtime_error("failed to create pipeline layout");
     }
@@ -354,7 +369,7 @@ void allocateBufferMemoryAndBind(const std::vector<VkBuffer> &buffers){
     }
 
     uint32_t memoryTypeIndex = findMemoryType(typeFilter, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
     VkMemoryAllocateInfo allocateInfo = {};
     allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -465,9 +480,13 @@ int main(){
     uint32_t bindingsCount = 3;
     createBindingsAndPipelineLayout(bindingsCount);
 
-    createComputePipeline("../../vector_add/shaders/vector_add.comp.spv");
+    createComputePipeline("../../matmult/shaders/matmult.comp.spv");
 
-    const uint32_t elements = 100000000;
+    uint32_t n = 1024; // 8192
+    uint32_t m = 1024;
+    uint32_t k = 1024;
+
+    const uint32_t elements = n*m;
     std::vector<VkBuffer> buffers;
 
     createBuffers(buffers, 3, elements);
@@ -481,10 +500,14 @@ int main(){
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
+    pushConstants pC{.n = n, .m = m, .k = k};
+
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pC);
+
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdDispatch(commandBuffer, elements, 1, 1);
+    vkCmdDispatch(commandBuffer, n/16, k/16, 1);
 
     if(vkEndCommandBuffer(commandBuffer) != VK_SUCCESS){
         throw std::runtime_error("failed to end command buffer");
@@ -505,13 +528,19 @@ int main(){
     std::mt19937 gen(rd());
     std::uniform_real_distribution<> dis(0.0, 10.0);
 
-    for(uint32_t i = 0;i<elements;i++){
-        d_a[i] = dis(gen);
-        d_b[i] = dis(gen);
-        d_c[i] = 0.0;
+    for(uint32_t i = 0;i<n;i++){
+        for(uint32_t j = 0;j<m;j++){
+            d_a[i*m + j] = dis(gen);
+            d_b[i*m + j] = dis(gen);
+            d_c[i*m + j] = 0;
+        }
     }
 
     vkUnmapMemory(device, memory);
+
+    std::cout<<"Initialization done"<<std::endl;
+
+    auto startTime = std::chrono::high_resolution_clock::now();
 
     VkSubmitInfo submitInfo = {};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -520,6 +549,10 @@ int main(){
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     // but we can simply wait for all the work to be done
     vkQueueWaitIdle(queue);
+
+    auto endTime = std::chrono::high_resolution_clock::now();
+
+    std::cout<<"GPU multiplication done in: "<< std::chrono::duration<float, std::chrono::seconds::period>(endTime - startTime).count() <<std::endl;
 
     data = nullptr;
     if(vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void **>(&data)) != VK_SUCCESS){
@@ -534,13 +567,25 @@ int main(){
 
     bool is_wrong = false;
 
-    for(uint32_t i=0;i<elements;i++){
-        if(d_c[i] != d_a[i] + d_b[i]){
-            is_wrong = true;
-            break;
+    startTime = std::chrono::high_resolution_clock::now();
+
+    for(uint32_t i=0;i<n;i++){
+        for(uint32_t j=0;j<k;j++){
+            float result = 0.0;
+            for(uint32_t t=0;t<m;t++){
+                result += d_a[i*m + t] * d_b[t*k + j];
+            }
+
+            if(d_c[i*m + j] - result > 1e-6){
+                is_wrong = true;
+                break;
+            }
         }
     }
 
+    endTime = std::chrono::high_resolution_clock::now();
+
+    std::cout<<"CPU multiplication done in: "<<std::chrono::duration<float, std::chrono::seconds::period>(endTime - startTime).count()<<std::endl;
     vkUnmapMemory(device, memory);
 
     if(is_wrong){
@@ -565,7 +610,5 @@ int main(){
     }
 
     vkDestroyInstance(instance, nullptr);
-
     return 0;
 }
-
