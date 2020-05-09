@@ -357,14 +357,19 @@ uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     throw std::runtime_error("failed to find suitable memory type!");
 }
 
-void allocateBufferMemoryAndBind(const std::vector<VkBuffer> &buffers){
+void allocateBufferMemoryAndBind(const std::vector<VkBuffer> &buffers, std::vector<uint32_t> &offsets){
     VkDeviceSize requiredMemorySize = 0;
     uint32_t typeFilter = 0;
 
     for(const VkBuffer& buff : buffers){
         VkMemoryRequirements bufferMemoryRequirements;
+
         vkGetBufferMemoryRequirements(device, buff, &bufferMemoryRequirements);
         requiredMemorySize += bufferMemoryRequirements.size;
+
+        if(bufferMemoryRequirements.size % bufferMemoryRequirements.alignment != 0){
+            requiredMemorySize += bufferMemoryRequirements.alignment - bufferMemoryRequirements.size % bufferMemoryRequirements.alignment;
+        }
         typeFilter |= bufferMemoryRequirements.memoryTypeBits;
     }
 
@@ -383,15 +388,19 @@ void allocateBufferMemoryAndBind(const std::vector<VkBuffer> &buffers){
     VkDeviceSize offset = 0;
 
     for(const VkBuffer& buff : buffers){
+        offsets.push_back(static_cast<uint32_t>(offset));
+
         VkMemoryRequirements bufferMemoryRequirements;
         vkGetBufferMemoryRequirements(device, buff, &bufferMemoryRequirements);
-        requiredMemorySize += bufferMemoryRequirements.size;
 
         if(vkBindBufferMemory(device, buff, memory, offset) != VK_SUCCESS){
             throw std::runtime_error("failed to bind buffer memory");
         }
 
         offset += bufferMemoryRequirements.size;
+        if(bufferMemoryRequirements.size % bufferMemoryRequirements.alignment != 0){
+            offset += bufferMemoryRequirements.alignment - bufferMemoryRequirements.size % bufferMemoryRequirements.alignment;
+        }
     }
 
 }
@@ -482,15 +491,16 @@ int main(){
 
     createComputePipeline("../../matmult/shaders/matmult.comp.spv");
 
-    uint32_t n = 1024; // 8192
-    uint32_t m = 1024;
-    uint32_t k = 1024;
+    uint32_t n = 1000; // 8192
+    uint32_t m = 1000;
+    uint32_t k = 1000;
 
     const uint32_t elements = n*m;
     std::vector<VkBuffer> buffers;
+    std::vector<uint32_t> offsets;
 
     createBuffers(buffers, 3, elements);
-    allocateBufferMemoryAndBind(buffers);
+    allocateBufferMemoryAndBind(buffers, offsets);
     allocateDescriptorSets(buffers);
 
     createCommandPoolAndBuffer();
@@ -507,22 +517,22 @@ int main(){
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdDispatch(commandBuffer, n/16, k/16, 1);
+    vkCmdDispatch(commandBuffer, (n+15)/16, (k+15)/16, 1);
 
     if(vkEndCommandBuffer(commandBuffer) != VK_SUCCESS){
         throw std::runtime_error("failed to end command buffer");
     }
 
-    float *data = nullptr;
-    if(vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void **>(&data)) != VK_SUCCESS){
+    char *data = nullptr;
+    if(vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&data)) != VK_SUCCESS){
         throw std::runtime_error("failed to map device memory");
     }
 
-    float* d_a = data;
+    float* d_a = reinterpret_cast<float*>(data + offsets[0]);
 
-    float* d_b = data + elements;
+    float* d_b = reinterpret_cast<float*>(data + offsets[1]);
 
-    float* d_c = data + 2*elements;
+    float* d_c = reinterpret_cast<float*>(data + offsets[2]);
 
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -559,11 +569,11 @@ int main(){
         throw std::runtime_error("failed to map device memory");
     }
 
-    d_a = data;
+    d_a = reinterpret_cast<float*>(data + offsets[0]);
 
-    d_b = data + elements;
+    d_b = reinterpret_cast<float*>(data + offsets[1]);
 
-    d_c = data + 2*elements;
+    d_c = reinterpret_cast<float*>(data + offsets[2]);
 
     bool is_wrong = false;
 

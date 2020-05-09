@@ -16,6 +16,8 @@ void main(){
 	uint x = gl_GlobalInvocationID.x;
 	uint y = gl_GlobalInvocationID.y;
 
+	if(x >= n || y >= k)return;
+
 	float r = 0.0;
 	for(uint i = 0;i<m;i++){
 		r += a[x*m + i] * b[i*m + y];
